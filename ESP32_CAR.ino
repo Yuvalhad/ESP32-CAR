@@ -6,10 +6,10 @@
 #include "esp_camera.h"
 #include "camera_pins.h"
 
-#define motor_rb 13
-#define motor_rf 15
-#define motor_lb 14
-#define motor_lf 2
+#define motor_rb 13 // in4
+#define motor_rf 15 // in3
+#define motor_lb 14 // in2
+#define motor_lf 2 //in1
 
 // Wi-Fi credentials
 const char* ssid = "Pixel 6";
@@ -20,7 +20,7 @@ const char* password = "Yuval111";
 // Web server
 WebServer server(80);
 
-void startCameraServer();
+//void startCameraServer();
 
 void Backward(){
   digitalWrite(motor_rb,HIGH);
@@ -92,7 +92,11 @@ void setupCamera() {
         config.jpeg_quality = 10;
         config.fb_count = 2;
     }
-    startCameraServer();
+  //  startCameraServer();
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x\n", err);
+  }
 }
 
 
@@ -110,6 +114,10 @@ void handle_stream() {
         if (!fb) {
             Serial.println("Camera capture failed");
             break;
+        }
+        else{
+         Serial.printf("Camera capture Works");
+         break;
         }
 
         // שליחת פריים
@@ -159,7 +167,8 @@ const char* html = R"rawliteral(
 </head>
 <body>
     <div class="camera-container">
-        <img id="camera-stream" src="/stream" alt="Camera Stream" onerror="reloadImage()">
+        <img id="camera-stream" src="/stream" alt="Camera Stream" onerror="console.log('Stream error!'); reloadImage()" 
+     onload="console.log('Stream loaded!')"/>
     </div>
     <div class="controls">
         <div class="row">
@@ -227,11 +236,14 @@ void setup() {
     Serial.println("Connected to WiFi");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
-    
+
+    server.on("/stream", HTTP_GET, handle_stream);
+
     // Define web server routes
     server.on("/", HTTP_GET, []() {
-        server.send(200, "text/html", html);
+        server.send(200, "text/html", html);       
     });
+
     
  server.on("/control", HTTP_GET, []() {
     String cmd = server.arg("cmd");
@@ -249,11 +261,9 @@ void setup() {
     }
     server.send(200, "text/plain", "OK");
 });
-     server.on("/stream", HTTP_GET, handle_stream);
 
     server.begin();
 }
-
 
 void loop() {
  server.handleClient();  
