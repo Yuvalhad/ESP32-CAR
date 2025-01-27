@@ -1,5 +1,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
 
 #define CAMERA_MODEL_AI_THINKER
 
@@ -14,13 +17,13 @@
 // Wi-Fi credentials
 const char* ssid = "Pixel 6";
 const char* password = "Yuval111";
-//const char* ssid = "Hadad";
-//const char* password = "0505660119";
-
+//bool manualMode = true; // for the obstacle detect and pass the obstacle
 // Web server
 WebServer server(80);
 
-//void startCameraServer();
+// FreeRTOS variables
+QueueHandle_t commandQueue = NULL;
+TaskHandle_t cameraTaskHandle = NULL;
 
 void Backward(){
   digitalWrite(motor_rb,HIGH);
@@ -57,6 +60,37 @@ void initialMotor(){
   digitalWrite(motor_rf,LOW);
   digitalWrite(motor_lb,LOW);
   digitalWrite(motor_lf,LOW);
+}
+
+//thread for the commands
+void commandTask(void* arg){
+  char cmd;
+  while(true){
+    if (xQueueReceive(commandQueue, &cmd, portMAX_DELAY)){
+     executeCommand(cmd);
+    }
+  }
+  return;
+}
+
+void handleControl(){
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+    String cmd = server.arg("cmd");
+    if(cmd.length() > 0){
+     static char currentCommand = cmd[0]; 
+     xQueueSend(commandQueue, &currentCommand, 0);
+    }  
+    server.send(200, "text/plain", "command recieved " + cmd);
+}
+
+// Camera task function
+void cameraTask(void *pvParameters) {
+  while(1) {
+    if(esp_camera_sensor_get() == NULL) {
+      setupCamera(); // Reinitialize if needed
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
 }
 
 // Camera setup function
@@ -97,27 +131,28 @@ void setupCamera() {
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x\n", err);
   }
+  else if (err == ESP_ERR_INVALID_STATE) {
+        Serial.println("Camera already initialized or in an invalid state.");
+    } else if (err == ESP_ERR_NO_MEM) {
+        Serial.println("Not enough memory.");
+    } else if (err == ESP_ERR_NOT_FOUND) {
+        Serial.println("Camera not detected.");
+    } else {
+        Serial.println("Unknown error.");
+    }
 }
 
-
 void handle_stream() {
-    Serial.println("Starting video stream..."); // Debugging
-
-    // הגדרת כותרות לשידור וידאו
-    server.sendHeader("Content-Type", "multipart/x-mixed-replace; boundary=frame");
-    server.sendHeader("Connection", "close");
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-
+    //WiFiClient client = server.client();
+        server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(200, "multipart/x-mixed-replace; boundary=frame");
     while (true) {
         // לכידת תמונה
         camera_fb_t *fb = esp_camera_fb_get();
         if (!fb) {
             Serial.println("Camera capture failed");
             break;
-        }
-        else{
-         Serial.printf("Camera capture Works");
-         break;
         }
 
         // שליחת פריים
@@ -129,7 +164,30 @@ void handle_stream() {
         // שחרור המסגרת
         esp_camera_fb_return(fb);
 
-        delay(100); // קצב פריימים (לדוגמה, 10 פריימים לשנייה)
+        vTaskDelay(10/ portTICK_PERIOD_MS); // קצב פריימים (לדוגמה, 10 פריימים לשנייה)
+    }
+}
+
+void executeCommand(char cmd){
+  Serial.printf("Received command: %s\n", cmd); // Debugging
+    switch (cmd){
+    case 'W':
+        Forward();
+        break;
+    case 'S':
+        Backward();
+        break;
+    case 'A':
+        Left();
+        break;
+    case 'D':
+        Right();
+        break;
+    case 'Q':
+        initialMotor();
+        break;
+    default:
+       break;    
     }
 }
 
@@ -140,25 +198,33 @@ const char* html = R"rawliteral(
     <title>ESP32 Car Control with Camera</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        .button {
+     .button {
             padding: 20px 40px;
             font-size: 20px;
             margin: 5px;
             border: 1px solid #000; /* הוסף גבול */
         }
+     .button.backward {
+        width: 120px; /* רוחב מותאם */
+        height: 60px; /* גובה מותאם */
+      }
+
+     .button.active{
+      background-color: #fff;
+     }    
         .controls {
             text-align: center;
             margin-top: 20px;
         }
         .row {
-            margin: 10px;
+            margin:10px;
         }
         .camera-container {
             text-align: center;
             margin-bottom: 20px;
         }
         #camera-stream {
-            max-width: 100%;
+            max-width: 50%;
             height: auto;
             margin: 0 auto;
             border: 2px solid #333;
@@ -167,8 +233,7 @@ const char* html = R"rawliteral(
 </head>
 <body>
     <div class="camera-container">
-        <img id="camera-stream" src="/stream" alt="Camera Stream" onerror="console.log('Stream error!'); reloadImage()" 
-     onload="console.log('Stream loaded!')"/>
+      <img id="camera-stream" src="/stream" alt="Camera Stream" style="max-width: 50%; border: 2px solid #333;">
     </div>
     <div class="controls">
         <div class="row">
@@ -183,8 +248,8 @@ const char* html = R"rawliteral(
 
     <script>
         function sendCommand(command) {
-            console.log("Sending command: " + command); // Debugging
-            fetch('/control?cmd=' + command, { timeout: 5000 }) // הוסף timeout
+            console.log("Sending command: " + command);
+            fetch('/control?cmd=' + command) 
                 .then(response => {
                     if (!response.ok) {
                         throw new Error("Network response was not ok");
@@ -193,24 +258,10 @@ const char* html = R"rawliteral(
                 })
                 .then(data => console.log(data))
                 .catch(error => {
-                    console.error("Error sending command:", error);
+                       console.error("Error sending command:", error);
                 });
         }
         
-        function reloadImage() {
-            console.log("Reloading image..."); // Debugging
-            fetch('/stream')
-                .then(response => {
-                    if (response.ok) {
-                        document.getElementById('camera-stream').src = '/stream?' + new Date().getTime();
-                    } else {
-                        console.error("Server not responding");
-                    }
-                })
-                .catch(error => {
-                    console.error("Error fetching stream:", error);
-                });
-        }
     </script>
 </body>
 </html>
@@ -219,7 +270,7 @@ const char* html = R"rawliteral(
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(false);
-   
+
   setupCamera();
 
   pinMode(motor_rf,OUTPUT);
@@ -237,32 +288,41 @@ void setup() {
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
 
-    server.on("/stream", HTTP_GET, handle_stream);
+  // Create command queue
+  commandQueue = xQueueCreate(6, sizeof(char));
+
+  // Create tasks
+  xTaskCreatePinnedToCore(
+    commandTask,
+    "CommandTask",
+    4096,
+    NULL,
+    2,  // Higher priority than camera task
+    NULL,
+    0
+  );
+
+  xTaskCreatePinnedToCore(
+    cameraTask,
+    "CameraTask",
+    4096,
+    NULL,
+    1,  // Lower priority than command task
+    &cameraTaskHandle,
+    1
+  );
 
     // Define web server routes
     server.on("/", HTTP_GET, []() {
         server.send(200, "text/html", html);       
     });
 
-    
- server.on("/control", HTTP_GET, []() {
-    String cmd = server.arg("cmd");
-    Serial.printf("Received command: %s\n", cmd.c_str()); // Debugging
-    if (cmd == "W" || cmd == "w") {
-        Forward();
-    } else if (cmd == "S" || cmd == "s") {
-        Backward();
-    } else if (cmd == "A" || cmd == "a") {
-        Left();
-    } else if (cmd == "D" || cmd == "d") {
-        Right();
-    } else if (cmd == "Q" || cmd == "q") {
-        initialMotor();
-    }
-    server.send(200, "text/plain", "OK");
-});
+    server.on("/stream", HTTP_GET, handle_stream);
 
+    server.on("/control", HTTP_GET, handleControl);
+  
     server.begin();
+    Serial.printf("server begin");
 }
 
 void loop() {
