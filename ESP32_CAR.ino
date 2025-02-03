@@ -222,16 +222,12 @@ const char* html = R"rawliteral(
             padding: 20px 40px;
             font-size: 20px;
             margin: 5px;
-            border: 1px solid #000; /* הוסף גבול */
+            border: 1px solid #000; 
         }
-     .button.backward {
-        width: 120px; /* רוחב מותאם */
-        height: 60px; /* גובה מותאם */
-      }
 
-     .button.active{
-      background-color: #fff;
-     }    
+     .button:active {
+          background-color: #45a049;
+        }    
         .controls {
             text-align: center;
             margin-top: 20px;
@@ -343,9 +339,7 @@ void setup() {
 
     server.on("/stream", HTTP_GET, handle_stream);
 
-    server.on("/control", HTTP_GET, handleControl); //here is the problem i need this to work as task 
-    
-    //server.on("/stream", HTTP_GET, handle_stream);
+    server.on("/control", HTTP_GET, handleControl);
     
     server.begin();
     Serial.printf("server begin");
