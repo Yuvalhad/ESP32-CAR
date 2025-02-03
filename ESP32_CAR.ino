@@ -24,6 +24,8 @@ WebServer server(80);
 // FreeRTOS variables
 QueueHandle_t commandQueue = NULL;
 TaskHandle_t cameraTaskHandle = NULL;
+char currentCommand = 'Q';
+SemaphoreHandle_t cameraMutex = NULL;
 
 void Backward(){
   digitalWrite(motor_rb,HIGH);
@@ -64,33 +66,38 @@ void initialMotor(){
 
 //thread for the commands
 void commandTask(void* arg){
-  char cmd;
-  while(true){
-    if (xQueueReceive(commandQueue, &cmd, portMAX_DELAY)){
-     executeCommand(cmd);
+    char cmd;
+    while(true){
+        if(xQueueReceive(commandQueue, &cmd, portMAX_DELAY)){
+            executeCommand(cmd);
+            Serial.printf("Executed: %c\n", cmd);
+        }
     }
-  }
-  return;
+    vTaskDelete(NULL);
 }
 
 void handleControl(){
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-    String cmd = server.arg("cmd");
-    if(cmd.length() > 0){
-     static char currentCommand = cmd[0]; 
-     xQueueSend(commandQueue, &currentCommand, 0);
-    }  
-    server.send(200, "text/plain", "command recieved " + cmd);
-}
-
-// Camera task function
-void cameraTask(void *pvParameters) {
-  while(1) {
-    if(esp_camera_sensor_get() == NULL) {
-      setupCamera(); // Reinitialize if needed
+    if(server.method() == HTTP_OPTIONS){
+        server.send(204);
+        return;
     }
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
+
+    if(!server.hasArg("cmd")){
+        server.send(400, "text/plain", "No command");
+        return;
+    }
+
+    char cmd = server.arg("cmd")[0];
+    if(strchr("QWASD", cmd) == NULL){
+        server.send(400, "text/plain", "Invalid command");
+        return;
+    }
+
+    if(xQueueSend(commandQueue, &cmd, 0) == pdPASS){
+        server.send(200, "text/plain", "Command received");
+    }else{
+        server.send(500, "text/plain", "Queue full");
+    }
 }
 
 // Camera setup function
@@ -142,34 +149,47 @@ void setupCamera() {
     }
 }
 
+// Camera task function
+void cameraTask(void *pvParameters) {
+  Serial.printf("cameraTask running on core %d\n", xPortGetCoreID());
+  while(1) {
+    if(esp_camera_sensor_get() == NULL) {
+      setupCamera(); // Reinitialize if needed
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
 void handle_stream() {
-    //WiFiClient client = server.client();
-        server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-        server.sendHeader("Access-Control-Allow-Origin", "*");
-        server.send(200, "multipart/x-mixed-replace; boundary=frame");
-    while (true) {
-        // לכידת תמונה
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) {
-            Serial.println("Camera capture failed");
-            break;
+    WiFiClient client = server.client();
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
+    client.println();
+    xSemaphoreTake(cameraMutex, portMAX_DELAY);
+
+    unsigned long lastFrame = 0;
+    while(client.connected()) {
+        // Maintain 100ms frame interval (~10 FPS)
+        if(millis() - lastFrame >= 100) {
+            camera_fb_t *fb = esp_camera_fb_get();
+            if(fb) {
+                String header = "--frame\r\nContent-Type: image/jpeg\r\n\r\n";
+                client.write(header.c_str(), header.length());
+                client.write(fb->buf, fb->len);
+                client.println("\r\n");
+                esp_camera_fb_return(fb);
+                lastFrame = millis();
+            }
         }
-
-        // שליחת פריים
-        server.sendContent("--frame\r\n");
-        server.sendContent("Content-Type: image/jpeg\r\n\r\n");
-        server.sendContent((const char *)fb->buf, fb->len);
-        server.sendContent("\r\n");
-
-        // שחרור המסגרת
-        esp_camera_fb_return(fb);
-
-        vTaskDelay(10/ portTICK_PERIOD_MS); // קצב פריימים (לדוגמה, 10 פריימים לשנייה)
+        xSemaphoreGive(cameraMutex);
+        
+        // Allow server to handle other requests
+        server.handleClient();
+        delay(1);
     }
 }
 
 void executeCommand(char cmd){
-  Serial.printf("Received command: %s\n", cmd); // Debugging
     switch (cmd){
     case 'W':
         Forward();
@@ -249,7 +269,7 @@ const char* html = R"rawliteral(
     <script>
         function sendCommand(command) {
             console.log("Sending command: " + command);
-            fetch('/control?cmd=' + command) 
+            fetch('/control?cmd=' + command, { method: "GET" })
                 .then(response => {
                     if (!response.ok) {
                         throw new Error("Network response was not ok");
@@ -261,7 +281,6 @@ const char* html = R"rawliteral(
                        console.error("Error sending command:", error);
                 });
         }
-        
     </script>
 </body>
 </html>
@@ -270,6 +289,8 @@ const char* html = R"rawliteral(
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(false);
+
+  cameraMutex = xSemaphoreCreateMutex();
 
   setupCamera();
 
@@ -289,7 +310,10 @@ void setup() {
     Serial.println(WiFi.localIP());
 
   // Create command queue
-  commandQueue = xQueueCreate(6, sizeof(char));
+  commandQueue = xQueueCreate(10, sizeof(char));
+  if(!commandQueue){
+    Serial.println("failed");
+  }
 
   // Create tasks
   xTaskCreatePinnedToCore(
@@ -297,7 +321,7 @@ void setup() {
     "CommandTask",
     4096,
     NULL,
-    2,  // Higher priority than camera task
+    3,  // Higher priority than camera task
     NULL,
     0
   );
@@ -308,7 +332,7 @@ void setup() {
     4096,
     NULL,
     1,  // Lower priority than command task
-    &cameraTaskHandle,
+    NULL,//&cameraTaskHandle,
     1
   );
 
@@ -319,12 +343,17 @@ void setup() {
 
     server.on("/stream", HTTP_GET, handle_stream);
 
-    server.on("/control", HTTP_GET, handleControl);
-  
+    server.on("/control", HTTP_GET, handleControl); //here is the problem i need this to work as task 
+    
+    //server.on("/stream", HTTP_GET, handle_stream);
+    
     server.begin();
     Serial.printf("server begin");
 }
 
 void loop() {
- server.handleClient();  
+  executeCommand('W');
+  executeCommand('Q');
+ server.handleClient();
+ vTaskDelay(5 / portTICK_PERIOD_MS);  
 }
