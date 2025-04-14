@@ -27,6 +27,9 @@ TaskHandle_t cameraTaskHandle = NULL;
 char currentCommand = 'Q';
 SemaphoreHandle_t cameraMutex = NULL;
 
+unsigned long lastGloveSignal = 0; // the last time that the glove send command
+bool gloveActive = false; // if the glove is in control
+
 void Backward(){
   digitalWrite(motor_rb,HIGH);
   digitalWrite(motor_rf,LOW);
@@ -44,17 +47,17 @@ void Forward(){
 void Left() {
   // Right motor forward, Left motor stop
   digitalWrite(motor_rb, LOW);
-  digitalWrite(motor_rf, HIGH);  // Right side moves
+  digitalWrite(motor_rf, LOW);  // Right side moves
   digitalWrite(motor_lb, LOW);
-  digitalWrite(motor_lf, LOW);   // Left side stops
+  digitalWrite(motor_lf, HIGH);   // Left side stops
 }
 
 void Right() {
   // Left motor forward, Right motor stop
   digitalWrite(motor_rb, LOW);
-  digitalWrite(motor_rf, LOW);   // Right side stops
+  digitalWrite(motor_rf, HIGH);   // Right side stops
   digitalWrite(motor_lb, LOW);
-  digitalWrite(motor_lf, HIGH);  // Left side moves
+  digitalWrite(motor_lf, LOW);  // Left side moves
 }
 
 void initialMotor(){
@@ -88,16 +91,30 @@ void handleControl(){
     }
 
     char cmd = server.arg("cmd")[0];
+    String source = server.arg("source");
+
     if(strchr("QWASD", cmd) == NULL){
         server.send(400, "text/plain", "Invalid command");
         return;
     }
 
-    if(xQueueSend(commandQueue, &cmd, 0) == pdPASS){
-        server.send(200, "text/plain", "Command received");
-    }else{
-        server.send(500, "text/plain", "Queue full");
+    if (source == "glove") {
+    lastGloveSignal = millis(); // update time for the glove
+    gloveActive = true;
+    if (xQueueSend(commandQueue, &cmd, 0) == pdPASS) {
+      server.send(200, "text/plain", "Glove command received");
+    } else {
+      server.send(500, "text/plain", "Queue full");
     }
+  } else if (source == "remote" && !gloveActive) { // the web remote will work just if the glove remote is down
+    if (xQueueSend(commandQueue, &cmd, 0) == pdPASS) {
+      server.send(200, "text/plain", "Remote command received");
+    } else {
+      server.send(500, "text/plain", "Queue full");
+    }
+  } else {
+    server.send(200, "text/plain", "Command ignored (glove active)");
+  }
 }
 
 // Camera setup function
@@ -265,7 +282,7 @@ const char* html = R"rawliteral(
     <script>
         function sendCommand(command) {
             console.log("Sending command: " + command);
-            fetch('/control?cmd=' + command, { method: "GET" })
+            fetch('/control?source=remote&cmd=' + command, { method: "GET" })
                 .then(response => {
                     if (!response.ok) {
                         throw new Error("Network response was not ok");
