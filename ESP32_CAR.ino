@@ -26,6 +26,14 @@ QueueHandle_t commandQueue = NULL;
 TaskHandle_t cameraTaskHandle = NULL;
 char currentCommand = 'Q';
 SemaphoreHandle_t cameraMutex = NULL;
+QueueHandle_t gloveCommandQueue = NULL;
+
+struct GloveCommand {
+    char cmd;
+    float x;
+    float y;
+};
+
 
 unsigned long lastGloveSignal = 0; // the last time that the glove send command
 bool gloveActive = false; // if the glove is in control
@@ -79,42 +87,80 @@ void commandTask(void* arg){
     vTaskDelete(NULL);
 }
 
-void handleControl(){
-    if(server.method() == HTTP_OPTIONS){
+void gloveCommandTask(void* arg) {
+    GloveCommand gloveCmd;
+    while (true) {
+        if (xQueueReceive(gloveCommandQueue, &gloveCmd, portMAX_DELAY)) {
+            executeGlove(gloveCmd.cmd, gloveCmd.x, gloveCmd.y);
+            Serial.printf("Executed glove command: %c, x: %.2f, y: %.2f\n", gloveCmd.cmd, gloveCmd.x, gloveCmd.y);
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+void handleControl() {
+    if (server.method() == HTTP_OPTIONS) {
         server.send(204);
         return;
     }
 
-    if(!server.hasArg("cmd")){
-        server.send(400, "text/plain", "No command");
+    if (!server.hasArg("cmd") || !server.hasArg("source")) {
+        server.send(400, "text/plain", "Missing command or source");
         return;
     }
 
     char cmd = server.arg("cmd")[0];
     String source = server.arg("source");
 
-    if(strchr("QWASD", cmd) == NULL){
+    if (strchr("QWASD", cmd) == NULL) {
+        server.send(400, "text/plain", "Invalid command");
+        return;
+    }
+
+    if (source == "remote" && !gloveActive) {
+        if (xQueueSend(commandQueue, &cmd, 0) == pdPASS) {
+            server.send(200, "text/plain", "Remote command received");
+        } else {
+            server.send(500, "text/plain", "Queue full");
+        }
+    } else {
+        server.send(200, "text/plain", "Command ignored (glove active or invalid source)");
+    }
+}
+
+void handleGloveControl() {
+    if (server.method() == HTTP_OPTIONS) {
+        server.send(204);
+        return;
+    }
+
+    if (!server.hasArg("cmd") || !server.hasArg("source") || !server.hasArg("x") || !server.hasArg("y")) {
+        server.send(400, "text/plain", "Missing parameters");
+        return;
+    }
+
+    char cmd = server.arg("cmd")[0];
+    float x = server.arg("x").toFloat();
+    float y = server.arg("y").toFloat();
+    String source = server.arg("source");
+
+    if (strchr("QWASD", cmd) == NULL) {
         server.send(400, "text/plain", "Invalid command");
         return;
     }
 
     if (source == "glove") {
-    lastGloveSignal = millis(); // update time for the glove
-    gloveActive = true;
-    if (xQueueSend(commandQueue, &cmd, 0) == pdPASS) {
-      server.send(200, "text/plain", "Glove command received");
+        lastGloveSignal = millis();
+        gloveActive = true;
+        GloveCommand gloveCmd = {cmd, x, y};
+        if (xQueueSend(gloveCommandQueue, &gloveCmd, 0) == pdPASS) {
+            server.send(200, "text/plain", "Glove command received");
+        } else {
+            server.send(500, "text/plain", "Queue full");
+        }
     } else {
-      server.send(500, "text/plain", "Queue full");
+        server.send(400, "text/plain", "Invalid source");
     }
-  } else if (source == "remote" && !gloveActive) { // the web remote will work just if the glove remote is down
-    if (xQueueSend(commandQueue, &cmd, 0) == pdPASS) {
-      server.send(200, "text/plain", "Remote command received");
-    } else {
-      server.send(500, "text/plain", "Queue full");
-    }
-  } else {
-    server.send(200, "text/plain", "Command ignored (glove active)");
-  }
 }
 
 // Camera setup function
@@ -228,6 +274,26 @@ void executeCommand(char cmd){
     }
 }
 
+void executeGlove(char cmd, float x, float y) {
+    if (abs(x) < 0.2 && abs(y) < 0.1) {
+        initialMotor();
+        cmd = 'Q';
+    } else if (x < -0.2) {
+        Left();
+        cmd = 'A';
+    } else if (x > 0.2) {
+        Right();
+        cmd = 'D';
+    } else if (y > 0.1) {
+        Forward();
+        cmd = 'W';
+    } else if (y < -0.1) {
+        Backward();
+        cmd = 'S';
+    }
+    Serial.printf("Glove command: %c, x: %.2f, y: %.2f\n", cmd, x, y);
+}
+
 const char* html = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -328,6 +394,12 @@ void setup() {
     Serial.println("failed");
   }
 
+  // create glove command queue
+  gloveCommandQueue = xQueueCreate(10, sizeof(GloveCommand));
+  if (!gloveCommandQueue) {
+    Serial.println("Failed to create glove command queue");
+  }
+
   // Create tasks
   xTaskCreatePinnedToCore(
     commandTask,
@@ -338,6 +410,16 @@ void setup() {
     NULL,
     0
   );
+
+  xTaskCreatePinnedToCore(
+        gloveCommandTask,
+        "GloveCommandTask",
+        4096,
+        NULL,
+        4,
+        NULL,
+        0
+    );
 
   xTaskCreatePinnedToCore(
     cameraTask,
@@ -357,14 +439,20 @@ void setup() {
     server.on("/stream", HTTP_GET, handle_stream);
 
     server.on("/control", HTTP_GET, handleControl);
+
+    server.on("/glove", HTTP_GET, handleGloveControl);
     
     server.begin();
     Serial.printf("server begin");
 }
 
 void loop() {
-  executeCommand('W');
-  executeCommand('Q');
  server.handleClient();
+
+ if (gloveActive && (millis() - lastGloveSignal > 5000)) {
+        gloveActive = false;
+        Serial.println("Glove inactive");
+  }
+
  vTaskDelay(5 / portTICK_PERIOD_MS);  
 }

@@ -11,11 +11,39 @@ const char* ssid     = "Pixel 6";
 const char* password = "Yuval111";
 
 // Server IP and URL
-const char* serverIP = "192.168.1.100";
-String serverURL = String("http://") + serverIP + "/control?cmd=";
+const char* serverIP = "192.168.1.100"; // need to change
 
 // Offset storage
 xyzFloat accOffset;
+
+// Function to send command to server
+void sendGloveCommand(char cmd, float x, float y) {
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+        String url = String("http://") + serverIP + "/glove?source=glove&cmd=" + cmd + "&x=" + String(x, 2) + "&y=" + String(y, 2);
+        http.begin(url);
+        http.setTimeout(500); // Set timeout to 500ms
+        int httpCode = http.GET();
+        if (httpCode == 200) {
+            String payload = http.getString();
+            Serial.println("HTTP Response: " + payload);
+        } else {
+            Serial.println("HTTP Request failed: " + String(httpCode));
+            // Retry once after a short delay
+            delay(100);
+            http.begin(url);
+            httpCode = http.GET();
+            if (httpCode == 200) {
+                Serial.println("Retry successful");
+            } else {
+                Serial.println("Retry failed: " + String(httpCode));
+            }
+        }
+        http.end();
+    } else {
+        Serial.println("WiFi not connected");
+    }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -84,6 +112,20 @@ void loop() {
   float normX = constrain(accX / 1.0, -1.0, 1.0);
   float normY = constrain(accY / 1.0, -1.0, 1.0);
 
+  // Determine command based on normX and normY
+    char cmd = 'Q'; // Default: stop
+    if (normX < -0.2) {
+        cmd = 'A'; // Left
+    } else if (normX > 0.2) {
+        cmd = 'D'; // Right
+    } else if (normY > 0.1) {
+        cmd = 'W'; // Forward
+    } else if (normY < -0.1) {
+        cmd = 'S'; // Backward
+    }  
+  
+   sendGloveCommand(cmd,normX,normY);
+  
   Serial.print("Norm X: ");
   Serial.print(normX, 2);
   Serial.print(" | Norm Y: ");
